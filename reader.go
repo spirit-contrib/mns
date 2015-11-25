@@ -53,7 +53,7 @@ func init() {
 	spirit.RegisterReader(mnsReaderURN, NewMNSReader)
 }
 
-func NewMNSReader(config spirit.Config) (r io.ReadCloser, err error) {
+func NewMNSReader(config spirit.Map) (r io.ReadCloser, err error) {
 	conf := MNSReaderConfig{}
 	if err = config.ToObject(&conf); err != nil {
 		return
@@ -133,16 +133,19 @@ func (p *MNSReader) Read(data []byte) (n int, err error) {
 			errResp := ali_mns.ErrorMessageResponse{}
 
 			if e := mnsDecoder.Decode(resp.Body, &errResp); e == nil {
-				spirit.Logger().WithField("actor", spirit.ActorReader).
-					WithField("urn", mnsReaderURN).
-					WithField("event", "read").
-					WithField("url", p.conf.URL).
-					WithField("queue", p.conf.Queue).
-					WithField("status_code", resp.StatusCode).
-					WithField("code", errResp.Code).
-					WithField("host_id", errResp.HostId).
-					WithField("request_id", errResp.RequestId).
-					Errorln(errors.New(errResp.Message))
+				if errResp.Code != "MessageNotExist" {
+					spirit.Logger().WithField("actor", spirit.ActorReader).
+						WithField("urn", mnsReaderURN).
+						WithField("event", "read").
+						WithField("url", p.conf.URL).
+						WithField("queue", p.conf.Queue).
+						WithField("status_code", resp.StatusCode).
+						WithField("code", errResp.Code).
+						WithField("host_id", errResp.HostId).
+						WithField("request_id", errResp.RequestId).
+						Errorln(errors.New(errResp.Message))
+				}
+				return
 			} else {
 				spirit.Logger().WithField("actor", spirit.ActorReader).
 					WithField("urn", mnsReaderURN).

@@ -42,7 +42,7 @@ func init() {
 	spirit.RegisterWriter(msnWriterURN, NewMNSWriter)
 }
 
-func NewMNSWriter(config spirit.Config) (w io.WriteCloser, err error) {
+func NewMNSWriter(config spirit.Map) (w io.WriteCloser, err error) {
 	conf := MNSWriterConfig{}
 	if err = config.ToObject(&conf); err != nil {
 		return

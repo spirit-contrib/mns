@@ -1,1 +1,318 @@
 package mns
+
+import (
+	"bytes"
+	"github.com/gogap/ali_mns"
+	"sync"
+	"time"
+
+	"github.com/gogap/spirit"
+)
+
+const (
+	mnsSenderURN = "urn:spirit-contrib:sender:mns"
+
+	mnsSenderFlowMetadata     = "urn:spirit-contrib:sender:mns#flow"
+	mnsSenderQueueURNMetadata = "urn:spirit-contrib:sender:mns#queue_urn"
+)
+
+var _ spirit.TranslatorSender = new(MNSSender)
+
+type _Deliveries struct {
+	Deliveries []spirit.Delivery
+	Error      error
+}
+
+type MNSSenderConfig struct {
+	URL             string `json:"url"`
+	AccessKeyId     string `json:"access_key_id"`
+	AccessKeySecret string `json:"access_key_secret"`
+	DelaySeconds    int    `json:"delay_seconds"`
+	Priority        int    `json:"priority"`
+	ProxyAddress    string `json:"proxy_address"`
+}
+
+type MNSSender struct {
+	statusLocker sync.Mutex
+	terminaled   chan bool
+	conf         MNSSenderConfig
+
+	status spirit.Status
+
+	mnsClient    map[string]ali_mns.AliMNSQueue
+	clientLocker sync.Mutex
+
+	translator spirit.OutputTranslator
+
+	getter spirit.DeliveryGetter
+}
+
+func init() {
+	spirit.RegisterSender(mnsSenderURN, NewMNSSender)
+}
+
+func NewMNSSender(config spirit.Map) (sender spirit.Sender, err error) {
+	conf := MNSSenderConfig{}
+	if err = config.ToObject(&conf); err != nil {
+		return
+	}
+
+	if conf.URL == "" {
+		err = ErrAliURLIsEmpty
+		return
+	}
+
+	if conf.AccessKeyId == "" {
+		err = ErrAliAccessKeyIdIsEmpty
+		return
+	}
+
+	if conf.AccessKeySecret == "" {
+		err = ErrAliAccessKeySecretIsEmpty
+		return
+	}
+
+	if conf.Priority == 0 {
+		conf.Priority = 8
+	}
+
+	if conf.DelaySeconds > 604800 {
+		conf.DelaySeconds = 604800
+	}
+
+	if conf.DelaySeconds < 0 {
+		conf.DelaySeconds = 0
+	}
+
+	sender = &MNSSender{
+		conf:       conf,
+		mnsClient:  make(map[string]ali_mns.AliMNSQueue),
+		terminaled: make(chan bool),
+	}
+
+	return
+}
+
+func (p *MNSSender) Start() (err error) {
+	p.statusLocker.Lock()
+	defer p.statusLocker.Unlock()
+
+	if p.status == spirit.StatusRunning {
+		err = spirit.ErrSenderAlreadyRunning
+		return
+	}
+
+	spirit.Logger().WithField("actor", spirit.ActorSender).
+		WithField("urn", mnsSenderURN).
+		WithField("event", "start").
+		Infoln("enter start")
+
+	if p.getter == nil {
+		err = spirit.ErrSenderDeliveryGetterIsNil
+		return
+	}
+
+	p.terminaled = make(chan bool)
+
+	p.status = spirit.StatusRunning
+
+	go func() {
+		for {
+			if deliveries, err := p.getter.Get(); err != nil {
+				spirit.Logger().
+					WithField("actor", spirit.ActorSender).
+					WithField("urn", mnsSenderURN).
+					WithField("event", "get delivery from getter").
+					Errorln(err)
+			} else {
+				for _, delivery := range deliveries {
+					if metadata := delivery.Metadata(); metadata != nil {
+						flow := MNSFlowMetadata{}
+						if err := metadata.Object(mnsSenderFlowMetadata, &flow); err != nil {
+							spirit.Logger().
+								WithField("actor", spirit.ActorSender).
+								WithField("urn", mnsSenderURN).
+								WithField("event", "convert metadata to mns_flow failed").
+								Errorln(err)
+
+							continue
+						}
+						p.callFlow(delivery, &flow)
+					} else {
+						spirit.Logger().
+							WithField("actor", spirit.ActorSender).
+							WithField("urn", mnsSenderURN).
+							WithField("event", "get metadata").
+							Warnln("metadata not exist")
+
+						continue
+					}
+				}
+			}
+
+			select {
+			case signal := <-p.terminaled:
+				{
+					if signal == true {
+						spirit.Logger().WithField("actor", spirit.ActorSender).
+							WithField("urn", mnsSenderURN).
+							WithField("event", "terminal").
+							Debugln("terminal singal received")
+						return
+					}
+				}
+			case <-time.After(time.Microsecond * 10):
+				{
+					continue
+				}
+			}
+		}
+	}()
+
+	return
+}
+
+func (p *MNSSender) Stop() (err error) {
+	p.statusLocker.Lock()
+	defer p.statusLocker.Unlock()
+
+	if p.status == spirit.StatusStopped {
+		err = spirit.ErrSenderDidNotRunning
+		return
+	}
+
+	spirit.Logger().WithField("actor", spirit.ActorSender).
+		WithField("urn", mnsSenderURN).
+		WithField("event", "stop").
+		Infoln("enter stop")
+
+	p.terminaled <- true
+
+	close(p.terminaled)
+
+	spirit.Logger().WithField("actor", spirit.ActorSender).
+		WithField("urn", mnsSenderURN).
+		WithField("event", "stop").
+		Infoln("stopped")
+
+	return
+}
+
+func (p *MNSSender) Status() spirit.Status {
+	return p.status
+}
+
+func (p *MNSSender) SetDeliveryGetter(getter spirit.DeliveryGetter) (err error) {
+	p.getter = getter
+	return
+}
+
+func (p *MNSSender) getMNSClient(queue string) ali_mns.AliMNSQueue {
+	p.clientLocker.Lock()
+	defer p.clientLocker.Unlock()
+
+	if q, exist := p.mnsClient[queue]; exist {
+		return q
+	}
+
+	cli := ali_mns.NewAliMNSClient(p.conf.URL, p.conf.AccessKeyId, p.conf.AccessKeySecret)
+	if p.conf.ProxyAddress != "" {
+		cli.SetProxy(p.conf.ProxyAddress)
+	}
+
+	q := ali_mns.NewMNSQueue(queue, cli)
+
+	p.mnsClient[queue] = q
+
+	return q
+}
+
+func (p *MNSSender) callFlow(delivery spirit.Delivery, flowMetadata *MNSFlowMetadata) {
+	if flowMetadata == nil {
+		return
+	}
+
+	sendDelveryFunc := func(ignoreSendError bool, delivery spirit.Delivery, queues ...string) (err error) {
+		if queues == nil || len(queues) == 0 {
+			return
+		}
+
+		backupURN := delivery.URN()
+		defer delivery.SetURN(backupURN)
+
+		queueURN := map[string]string{}
+
+		if err = delivery.Metadata().Object(mnsSenderQueueURNMetadata, &queueURN); err != nil {
+			spirit.Logger().
+				WithField("actor", spirit.ActorSender).
+				WithField("urn", mnsSenderURN).
+				WithField("event", "get queue urn").
+				Errorln(err)
+		}
+
+		for _, queue := range queues {
+
+			urn := ""
+			if queueURN != nil {
+				urn, _ = queueURN[queue]
+			}
+
+			buf := bytes.Buffer{}
+			delivery.SetURN(urn)
+
+			if err = p.translator.Out(&buf, delivery); err != nil {
+				spirit.Logger().
+					WithField("actor", spirit.ActorSender).
+					WithField("urn", mnsSenderURN).
+					WithField("event", "translate delivery").
+					Errorln(err)
+				return
+			} else {
+				reqData := ali_mns.MessageSendRequest{
+					MessageBody:  ali_mns.Base64Bytes(buf.Bytes()),
+					DelaySeconds: int64(p.conf.DelaySeconds),
+					Priority:     int64(p.conf.Priority),
+				}
+
+				client := p.getMNSClient(queue)
+				if _, err = client.SendMessage(reqData); err != nil {
+
+					spirit.Logger().
+						WithField("actor", spirit.ActorSender).
+						WithField("urn", mnsSenderURN).
+						WithField("event", "send mns message").
+						Errorln(err)
+
+					if ignoreSendError {
+						err = nil
+						continue
+					}
+					return
+				}
+			}
+		}
+		return
+	}
+
+	if delivery.Payload().LastError() != nil {
+		// run error flow
+		if flowMetadata.Error != nil {
+			delivery.SetMetadata(mnsSenderFlowMetadata, nil)
+			sendDelveryFunc(true, delivery, flowMetadata.Error...)
+		}
+
+	} else {
+		// run normal flow
+		if flowMetadata.Normal != nil {
+			flowItem := flowMetadata.Normal[flowMetadata.CurrentFlowId]
+			flowMetadata.CurrentFlowId += 1
+			delivery.SetMetadata(mnsSenderFlowMetadata, flowMetadata)
+			sendDelveryFunc(false, delivery, flowItem)
+		}
+	}
+}
+
+func (p *MNSSender) SetTranslator(translator spirit.OutputTranslator) (err error) {
+	p.translator = translator
+	return
+}
