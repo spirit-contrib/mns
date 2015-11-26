@@ -14,9 +14,9 @@ import (
 const (
 	mnsSenderURN = "urn:spirit-contrib:sender:mns"
 
-	mnsSenderFlowMetadata            = "urn:spirit-contrib:sender:mns#flow"
-	mnsSenderQueueURNMetadata        = "urn:spirit-contrib:sender:mns#queue_urn"
-	mnsSenderQueueParallelIdMetadata = "urn:spirit-contrib:sender:mns#parallel"
+	mnsSenderFlowMetadata           = "urn:spirit-contrib:sender:mns#flow"
+	mnsSenderQueueURNMetadata       = "urn:spirit-contrib:sender:mns#queue_urn"
+	mnsSenderQueueParallelIdContext = "urn:spirit-contrib:sender:mns#parallel"
 )
 
 var _ spirit.TranslatorSender = new(MNSSender)
@@ -242,12 +242,12 @@ func (p *MNSSender) callFlow(delivery spirit.Delivery, flowMetadata *MNSFlowMeta
 
 		backupURN := delivery.URN()
 		backupParallel := new(MNSParallelFlowMetadata)
-		delivery.Metadata().Object(mnsSenderQueueParallelIdMetadata, backupParallel)
+		delivery.Payload().Context().Object(mnsSenderQueueParallelIdContext, backupParallel)
 
 		// recover
 		defer func() {
 			delivery.SetURN(backupURN)
-			delivery.SetMetadata(mnsSenderQueueParallelIdMetadata, backupParallel)
+			delivery.Payload().SetContext(mnsSenderQueueParallelIdContext, backupParallel)
 		}()
 
 		for _, q := range queues {
@@ -268,7 +268,7 @@ func (p *MNSSender) callFlow(delivery spirit.Delivery, flowMetadata *MNSFlowMeta
 
 				// recover
 				delivery.SetURN(backupURN)
-				delivery.SetMetadata(mnsSenderQueueParallelIdMetadata, backupParallel)
+				delivery.Payload().SetContext(mnsSenderQueueParallelIdContext, backupParallel)
 
 				urn := ""
 				if queueURN != nil {
@@ -279,9 +279,7 @@ func (p *MNSSender) callFlow(delivery spirit.Delivery, flowMetadata *MNSFlowMeta
 				delivery.SetURN(urn)
 
 				if parallelCount > 0 {
-					delivery.SetMetadata(mnsSenderQueueParallelIdMetadata, MNSParallelFlowMetadata{Id: parallelQueuePid, Index: index, Count: parallelCount})
-				} else {
-					delivery.DeleteMetadata(mnsSenderQueueParallelIdMetadata)
+					delivery.Payload().SetContext(mnsSenderQueueParallelIdContext, MNSParallelFlowMetadata{Id: parallelQueuePid, Index: index, Count: parallelCount})
 				}
 
 				if err = p.translator.Out(&buf, delivery); err != nil {
