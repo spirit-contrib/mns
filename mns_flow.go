@@ -1,7 +1,12 @@
 package mns
 
 type MNSFlowMetadata struct {
-	CurrentFlowId int64    `json:"current_flow_id"`
+	CurrentFlowId int      `json:"current_flow_id"`
 	Error         []string `json:"error"`
 	Normal        []string `json:"normal"`
+}
+
+type MNSParallelFlowMetadata struct {
+	Id    string `json:"id"`
+	Count int    `json:"count"`
 }

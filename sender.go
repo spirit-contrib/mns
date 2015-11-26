@@ -3,6 +3,8 @@ package mns
 import (
 	"bytes"
 	"github.com/gogap/ali_mns"
+	"github.com/rs/xid"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,8 +14,9 @@ import (
 const (
 	mnsSenderURN = "urn:spirit-contrib:sender:mns"
 
-	mnsSenderFlowMetadata     = "urn:spirit-contrib:sender:mns#flow"
-	mnsSenderQueueURNMetadata = "urn:spirit-contrib:sender:mns#queue_urn"
+	mnsSenderFlowMetadata            = "urn:spirit-contrib:sender:mns#flow"
+	mnsSenderQueueURNMetadata        = "urn:spirit-contrib:sender:mns#queue_urn"
+	mnsSenderQueueParallelIdMetadata = "urn:spirit-contrib:sender:mns#parallel"
 )
 
 var _ spirit.TranslatorSender = new(MNSSender)
@@ -232,82 +235,143 @@ func (p *MNSSender) callFlow(delivery spirit.Delivery, flowMetadata *MNSFlowMeta
 		return
 	}
 
-	sendDelveryFunc := func(ignoreSendError bool, delivery spirit.Delivery, queues ...string) (err error) {
+	sendDeliveryFunc := func(ignoreSendError bool, delivery spirit.Delivery, queueURN map[string]string, queues ...string) (err error) {
 		if queues == nil || len(queues) == 0 {
 			return
 		}
 
 		backupURN := delivery.URN()
-		defer delivery.SetURN(backupURN)
+		backupParallel := new(MNSParallelFlowMetadata)
+		delivery.Metadata().Object(mnsSenderQueueParallelIdMetadata, backupParallel)
 
-		queueURN := map[string]string{}
+		// recover
+		defer func() {
+			delivery.SetURN(backupURN)
+			delivery.SetMetadata(mnsSenderQueueParallelIdMetadata, backupParallel)
+		}()
 
-		if err = delivery.Metadata().Object(mnsSenderQueueURNMetadata, &queueURN); err != nil {
-			spirit.Logger().
-				WithField("actor", spirit.ActorSender).
-				WithField("urn", mnsSenderURN).
-				WithField("event", "get queue urn").
-				Errorln(err)
-		}
+		for _, q := range queues {
 
-		for _, queue := range queues {
-
-			urn := ""
-			if queueURN != nil {
-				urn, _ = queueURN[queue]
+			if q == "" {
+				continue
 			}
 
-			buf := bytes.Buffer{}
-			delivery.SetURN(urn)
+			parallelQueues := strings.Split(q, "||")
+			parallelCount := len(parallelQueues)
+			parallelQueuePid := ""
 
-			if err = p.translator.Out(&buf, delivery); err != nil {
-				spirit.Logger().
-					WithField("actor", spirit.ActorSender).
-					WithField("urn", mnsSenderURN).
-					WithField("event", "translate delivery").
-					Errorln(err)
-				return
-			} else {
-				reqData := ali_mns.MessageSendRequest{
-					MessageBody:  ali_mns.Base64Bytes(buf.Bytes()),
-					DelaySeconds: int64(p.conf.DelaySeconds),
-					Priority:     int64(p.conf.Priority),
+			if parallelCount > 0 {
+				parallelQueuePid = xid.New().String()
+			}
+
+			for _, queue := range parallelQueues {
+
+				// recover
+				delivery.SetURN(backupURN)
+				delivery.SetMetadata(mnsSenderQueueParallelIdMetadata, backupParallel)
+
+				urn := ""
+				if queueURN != nil {
+					urn, _ = queueURN[queue]
 				}
 
-				client := p.getMNSClient(queue)
-				if _, err = client.SendMessage(reqData); err != nil {
+				buf := bytes.Buffer{}
+				delivery.SetURN(urn)
 
+				if parallelCount > 0 {
+					delivery.SetMetadata(mnsSenderQueueParallelIdMetadata, MNSParallelFlowMetadata{Id: parallelQueuePid, Count: parallelCount})
+				}
+
+				if err = p.translator.Out(&buf, delivery); err != nil {
 					spirit.Logger().
 						WithField("actor", spirit.ActorSender).
 						WithField("urn", mnsSenderURN).
-						WithField("event", "send mns message").
+						WithField("event", "translate delivery").
 						Errorln(err)
-
-					if ignoreSendError {
-						err = nil
-						continue
-					}
 					return
+				} else {
+					reqData := ali_mns.MessageSendRequest{
+						MessageBody:  ali_mns.Base64Bytes(buf.Bytes()),
+						DelaySeconds: int64(p.conf.DelaySeconds),
+						Priority:     int64(p.conf.Priority),
+					}
+
+					client := p.getMNSClient(queue)
+					if _, err = client.SendMessage(reqData); err != nil {
+
+						spirit.Logger().
+							WithField("actor", spirit.ActorSender).
+							WithField("urn", mnsSenderURN).
+							WithField("event", "send mns message").
+							Errorln(err)
+
+						if ignoreSendError {
+							err = nil
+							continue
+						}
+						return
+					}
 				}
 			}
+
 		}
 		return
 	}
 
+	currentQueueURN := map[string]string{}
+	if err := delivery.Metadata().Object(mnsSenderQueueURNMetadata, &currentQueueURN); err != nil {
+		spirit.Logger().
+			WithField("actor", spirit.ActorSender).
+			WithField("urn", mnsSenderURN).
+			WithField("event", "get queue urn").
+			Errorln(err)
+	}
+
 	if delivery.Payload().LastError() != nil {
 		// run error flow
-		if flowMetadata.Error != nil {
+
+		if flowMetadata.Error != nil && len(flowMetadata.Error) > 0 {
+
+			queueURN := map[string]string{}
+
+			for _, queue := range flowMetadata.Error {
+				if urn, exist := currentQueueURN[queue]; exist {
+					queueURN[queue] = urn
+				}
+			}
+
 			delivery.SetMetadata(mnsSenderFlowMetadata, nil)
-			sendDelveryFunc(true, delivery, flowMetadata.Error...)
+			sendDeliveryFunc(true, delivery, queueURN, flowMetadata.Error...)
 		}
 
 	} else {
 		// run normal flow
-		if flowMetadata.Normal != nil {
-			flowItem := flowMetadata.Normal[flowMetadata.CurrentFlowId]
+		if flowMetadata.Normal != nil && len(flowMetadata.Normal) > 0 {
+			nextQueue := flowMetadata.Normal[flowMetadata.CurrentFlowId]
+
+			queueURN := map[string]string{}
+
+			if len(flowMetadata.Normal) > int(flowMetadata.CurrentFlowId) {
+				tmpRemainQueues := flowMetadata.Normal[flowMetadata.CurrentFlowId:]
+
+				remainQueues := []string{}
+				for _, queue := range tmpRemainQueues {
+					queues := strings.Split(queue, "||")
+					remainQueues = append(remainQueues, queues...)
+				}
+
+				for _, queue := range remainQueues {
+					if urn, exist := currentQueueURN[queue]; exist {
+						queueURN[queue] = urn
+					}
+				}
+			}
+
 			flowMetadata.CurrentFlowId += 1
+			defer func() { flowMetadata.CurrentFlowId -= 1 }()
+
 			delivery.SetMetadata(mnsSenderFlowMetadata, flowMetadata)
-			sendDelveryFunc(false, delivery, flowItem)
+			sendDeliveryFunc(false, delivery, queueURN, nextQueue)
 		}
 	}
 }
