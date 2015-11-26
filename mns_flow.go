@@ -8,5 +8,6 @@ type MNSFlowMetadata struct {
 
 type MNSParallelFlowMetadata struct {
 	Id    string `json:"id"`
+	Index int    `json:"index"`
 	Count int    `json:"count"`
 }

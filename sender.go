@@ -264,7 +264,7 @@ func (p *MNSSender) callFlow(delivery spirit.Delivery, flowMetadata *MNSFlowMeta
 				parallelQueuePid = xid.New().String()
 			}
 
-			for _, queue := range parallelQueues {
+			for index, queue := range parallelQueues {
 
 				// recover
 				delivery.SetURN(backupURN)
@@ -279,7 +279,9 @@ func (p *MNSSender) callFlow(delivery spirit.Delivery, flowMetadata *MNSFlowMeta
 				delivery.SetURN(urn)
 
 				if parallelCount > 0 {
-					delivery.SetMetadata(mnsSenderQueueParallelIdMetadata, MNSParallelFlowMetadata{Id: parallelQueuePid, Count: parallelCount})
+					delivery.SetMetadata(mnsSenderQueueParallelIdMetadata, MNSParallelFlowMetadata{Id: parallelQueuePid, Index: index, Count: parallelCount})
+				} else {
+					delivery.DeleteMetadata(mnsSenderQueueParallelIdMetadata)
 				}
 
 				if err = p.translator.Out(&buf, delivery); err != nil {
@@ -351,7 +353,7 @@ func (p *MNSSender) callFlow(delivery spirit.Delivery, flowMetadata *MNSFlowMeta
 
 			queueURN := map[string]string{}
 
-			if len(flowMetadata.Normal) > int(flowMetadata.CurrentFlowId) {
+			if len(flowMetadata.Normal) > flowMetadata.CurrentFlowId {
 				tmpRemainQueues := flowMetadata.Normal[flowMetadata.CurrentFlowId:]
 
 				remainQueues := []string{}
