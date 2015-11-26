@@ -100,15 +100,15 @@ func (p *MNSSender) Start() (err error) {
 	p.statusLocker.Lock()
 	defer p.statusLocker.Unlock()
 
+	spirit.Logger().WithField("actor", spirit.ActorSender).
+		WithField("urn", mnsSenderURN).
+		WithField("event", "start").
+		Debugln("enter start")
+
 	if p.status == spirit.StatusRunning {
 		err = spirit.ErrSenderAlreadyRunning
 		return
 	}
-
-	spirit.Logger().WithField("actor", spirit.ActorSender).
-		WithField("urn", mnsSenderURN).
-		WithField("event", "start").
-		Infoln("enter start")
 
 	if p.getter == nil {
 		err = spirit.ErrSenderDeliveryGetterIsNil
@@ -172,6 +172,11 @@ func (p *MNSSender) Start() (err error) {
 		}
 	}()
 
+	spirit.Logger().WithField("actor", spirit.ActorSender).
+		WithField("urn", mnsSenderURN).
+		WithField("event", "start").
+		Infoln("started")
+
 	return
 }
 
@@ -179,15 +184,15 @@ func (p *MNSSender) Stop() (err error) {
 	p.statusLocker.Lock()
 	defer p.statusLocker.Unlock()
 
+	spirit.Logger().WithField("actor", spirit.ActorSender).
+		WithField("urn", mnsSenderURN).
+		WithField("event", "stop").
+		Debugln("enter stop")
+
 	if p.status == spirit.StatusStopped {
 		err = spirit.ErrSenderDidNotRunning
 		return
 	}
-
-	spirit.Logger().WithField("actor", spirit.ActorSender).
-		WithField("urn", mnsSenderURN).
-		WithField("event", "stop").
-		Infoln("enter stop")
 
 	p.terminaled <- true
 
